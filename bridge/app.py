@@ -46,6 +46,11 @@ DEVICE_NAME = os.environ.get("DEVICE_NAME", "Пылесос")
 DEVICE_ROOM = os.environ.get("DEVICE_ROOM", "Коридор")
 BRIDGE_PASSWORD = os.environ.get("BRIDGE_PASSWORD", "")
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
+OAUTH_CLIENT_ID = os.environ.get("OAUTH_CLIENT_ID", "https://social.yandex.net/")
+OAUTH_CLIENT_SECRET = os.environ.get("OAUTH_CLIENT_SECRET", "")
+
+# Не чаще одного письма с кодом в минуту
+_last_code_request = 0.0
 ACCOUNT_FILE = DATA_DIR / "account.json"
 
 # Same id that was verified during the probe run, so Ecovacs does not ask for a
@@ -493,6 +498,13 @@ def _unauthorised() -> JSONResponse:
     return JSONResponse({"error": "unauthorized"}, status_code=401)
 
 
+def _password_ok(candidate: str) -> bool:
+    """Constant-time comparison against the bridge password."""
+    if not BRIDGE_PASSWORD or not candidate:
+        return False
+    return secrets.compare_digest(candidate, BRIDGE_PASSWORD)
+
+
 @app.api_route("/", methods=["GET", "HEAD"])
 @app.api_route("/v1.0/", methods=["GET", "HEAD"])
 async def root() -> dict[str, Any]:
@@ -525,10 +537,15 @@ async def debug(authorization: str | None = Header(default=None)) -> Any:
 @app.post("/admin/request-code")
 async def admin_request_code(request: Request) -> Any:
     """Trigger the one-time e-mail code Ecovacs requires for a new login location."""
+    global _last_code_request
     body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
     password = str(body.get("password") or request.query_params.get("password") or "")
-    if not BRIDGE_PASSWORD or password != BRIDGE_PASSWORD:
+    if not _password_ok(password):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
+    now = time.time()
+    if now - _last_code_request < 60:
+        return JSONResponse({"error": "too_many_requests"}, status_code=429)
+    _last_code_request = now
     try:
         await robot.request_code()
     except Exception as exc:  # noqa: BLE001
@@ -543,7 +560,7 @@ async def admin_verify(request: Request) -> Any:
     body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
     password = str(body.get("password") or request.query_params.get("password") or "")
     code = str(body.get("code") or request.query_params.get("code") or "")
-    if not BRIDGE_PASSWORD or password != BRIDGE_PASSWORD:
+    if not _password_ok(password):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
     if not code:
         return JSONResponse({"ok": False, "error": "code is required"}, status_code=400)
@@ -705,7 +722,7 @@ async def authorize_submit(
 ) -> Any:
     if not redirect_uri.startswith("https://"):
         return HTMLResponse("<h3>Некорректный redirect_uri</h3>", status_code=400)
-    if not BRIDGE_PASSWORD or password != BRIDGE_PASSWORD:
+    if not _password_ok(password):
         return HTMLResponse("<h3>Неверный пароль</h3>", status_code=403)
 
     code = tokens.new_code()
@@ -716,6 +733,15 @@ async def authorize_submit(
 @app.post("/auth/token")
 async def token_endpoint(request: Request) -> Any:
     form = await request.form()
+
+    client_id = str(form.get("client_id", ""))
+    if client_id and client_id != OAUTH_CLIENT_ID:
+        return JSONResponse({"error": "invalid_client"}, status_code=401)
+    if OAUTH_CLIENT_SECRET:
+        client_secret = str(form.get("client_secret", ""))
+        if not secrets.compare_digest(client_secret, OAUTH_CLIENT_SECRET):
+            return JSONResponse({"error": "invalid_client"}, status_code=401)
+
     grant_type = str(form.get("grant_type", ""))
 
     if grant_type == "authorization_code":

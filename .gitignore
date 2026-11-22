@@ -1,0 +1,23 @@
+# Секреты и локальные данные
+bridge/bridge.env
+*.env
+!.env.example
+
+# Логи сборки и прогонов
+*.log
+
+# Окружения и служебные каталоги
+.venv/
+__pycache__/
+*.pyc
+.zcode/
+.mimosa/
+tmp/
+
+# Черновики импорта, не относящиеся к репозиторию
+deebot-alice/
+
+# ОС
+Thumbs.db
+desktop.ini
+.DS_Store
